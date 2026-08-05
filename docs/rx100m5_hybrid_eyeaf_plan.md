@@ -210,13 +210,63 @@ pinned to an eye — no longer needed).
    rollback plan should be: pack the **unmodified** original `firmware.tar`
    the same way and flash it back through this same validated path, rather
    than relying on restoring a raw `dd`-style partition dump.
-7. **BizFw/arbiter calling assumptions unverified.** We're assuming the
-   stock shooting UI calls into `CameraHardwareDiadem` the same way a generic
-   Camera HAL client would (i.e., through `autoFocus()`/`sendCommand`). Since
-   those binaries are fully stripped, this is inferred from architecture, not
-   directly confirmed by decompiling BizFw/arbiter itself.
+7. **BizFw/arbiter calling assumptions — PARTIALLY RESOLVED (2026-08-05, via
+   binary dependency analysis), and the answer changes the risk picture.**
+   Originally assumed the stock shooting UI calls into `CameraHardwareDiadem`
+   the same way a generic Android Camera HAL client would (i.e., through
+   `autoFocus()`/`sendCommand()` over the standard Binder `ICamera`/
+   `ICameraService` path). Checked this directly by extracting and inspecting
+   the dynamic dependencies (`DT_NEEDED`, via `objdump -p`) and dlopen/string
+   references of every binary in the native shooting-UI stack
+   (`arbiter.so`, `libBizFw.so`, `libBizFw2.so`, `libMWF.so`,
+   `dataflowInfraFramework.so` — all in `nflasha15`):
+   - **None of them link or dlopen `libbinder.so`, `libcamera_client.so`, or
+     `libcameraservice.so`** (all three of which exist, but only in
+     `nflasha16` alongside `libcamera.so` itself). They only depend on a
+     custom message-queue IPC layer (`libosal_uipc.so` —
+     `osal_snd_msg`/`osal_reg_msg_queue_cb`/etc.) and a proprietary hardware
+     object framework (`libMWF.so`/`dataflowInfraFramework.so`). `libBizFw.so`
+     exposes demangled C++ symbols for hardware "channel" objects
+     (`OBJAVBBCBASECLASS::VdfCh`, `AdfCh`, `SdiCh`, `SdfCh`, `StmCh`, `TcubCh`,
+     etc.) and a literal `ConvertResMidFromCameraLiro` symbol, confirming
+     BizFw talks to the imaging pipeline through this same proprietary
+     "AVBBC" object/message framework, not through Android's Camera API.
+   - `nflasha16` separately hosts a small `libarbiter_proxy.so` (exported
+     symbols `ABT_reg_resource`/`ABT_set_state`/`ABT_reg_observer`/
+     `ABT_PRXY_init`) that **also** links `libosal_uipc.so` — almost
+     certainly the bridge that lets whatever process hosts `libcamera.so`
+     (i.e. `mediaserver`) participate in the same OSAL message bus BizFw
+     uses, independent of Binder.
+   - Confirmed via `init.rc`/`init.usb.rc` location that `nflasha15` and
+     `nflasha16` share one single kernel/init instance (only one `init.rc`
+     exists, in `nflasha15`'s ramdisk; `nflasha16` is just its `/system`
+     mount) — so this isn't two separate machines, just two different IPC
+     mechanisms available within the same OS.
+   - **Practical implication (not yet empirically confirmed): the physical
+     shutter-button/native-UI AF-C loop most likely does *not* go through
+     Android's standard `autoFocus()`/`sendCommand()` Binder path at all** —
+     it likely talks to the DSP directly over this OSAL/arbiter bus. The
+     `executeAutoFocusStartTrigger`/`sendCommand(0x10000037)` path may only
+     be reachable from genuine Android Camera-Binder clients (USB tethered
+     shooting, Wi-Fi remote apps, MTP control), not from the physical
+     shutter button. This is a materially different conclusion than this
+     doc's original "Where this lives" framing ("it calls through this same
+     shared HAL library like any other client").
+   - **Still needed to fully close this out**: empirical, on-device
+     confirmation of which path the physical shutter button actually uses.
+     Cheapest test: patch a debug counter/log line at the entry of
+     `executeAutoFocusStartTrigger` (no behavior change), reflash, and
+     observe (via a log partition or any available on-device logging) whether
+     it increments on a normal S1 half-press in AF-C mode, versus only when
+     triggered from a tethered/remote Android-side client. If it does *not*
+     increment on a physical half-press, the whole patch needs to be
+     retargeted to wherever BizFw's own AVBBC/OSAL AF-trigger dispatch
+     happens instead (which would require reverse engineering the stripped
+     `libBizFw.so`, a substantially larger undertaking than originally
+     scoped).
 
 ## Proposed patch shape (single choke-point design)
+
 
 1. Add a new global/static byte, `g_facePresent`, in a code cave or unused
    `.bss` padding.

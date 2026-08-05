@@ -61,14 +61,18 @@ concurrent transfers.
 
 ## Which partitions to pull
 
-See [partition layout notes](../docs/rx100m5_hybrid_eyeaf_plan.md) for the
-full breakdown. For reverse-engineering `libcamera.so`-related behavior:
+See [PARTITION_LAYOUT.md](PARTITION_LAYOUT.md) for the full breakdown of
+every `nflasha*` device. For reverse-engineering `libcamera.so`-related
+behavior:
 
 ```
 pull /dev/nflasha16 nflasha16_live.img   # Android system partition, has libcamera.so (~83MB)
 pull /dev/nflasha15 nflasha15_live.img   # User cramfs, has arbiter.so/libBizFw*.so (~100MB)
 pull /dev/nflasha nflasha_full_backup.img  # entire flash chip, useful as a full backup (~500MB)
 ```
+
+> `pull`'s local-path argument is resolved relative to wherever you launched
+> `sudo python3 pmca-console.py updatershell`
 
 Dumped files will be owned by `root` (since the shell itself runs under
 `sudo`); fix ownership afterward with:
