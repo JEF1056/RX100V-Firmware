@@ -22,23 +22,14 @@ This produces `unpacked/firmware.dat`, `firmware.fdat`, `firmware.tar`,
 ### Fallback: `Exception: Unknown exe file`
 
 Some installer SFX wrappers aren't recognized by `fwtool.py`'s `lzh` parser
-(no `-lh0-` method string found where expected). Work around it by locating
-the `.dat` magic bytes directly and slicing the file from that offset to EOF,
-then unpacking the resulting `.dat` directly instead of the `.exe`:
+(no `-lh0-` method string found where expected). Work around it with
+[`extract_dat_from_exe.py`](extract_dat_from_exe.py) (included in this
+folder), which locates the `.dat` magic bytes directly and slices the file
+from that offset to EOF, producing a `firmware.dat` you can unpack directly
+instead of the `.exe`:
 
 ```
-python3 -c "
-import shutil
-magic = b'\x89UFU\r\n\x1a\n'
-with open('Update_DSCRX100M5V200.exe', 'rb') as src:
-    data = src.read()
-    offset = data.find(magic)
-    if offset < 0:
-        raise SystemExit('magic bytes not found')
-    src.seek(offset)
-    with open('unpacked/firmware.dat', 'wb') as dst:
-        shutil.copyfileobj(src, dst)
-"
+python3 extract_dat_from_exe.py Update_DSCRX100M5V200.exe unpacked/
 python3 fwtool.py unpack -f unpacked/firmware.dat -o unpacked/
 ```
 
