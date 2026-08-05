@@ -8,7 +8,12 @@ goes wrong. Verified working end-to-end on RX100M5 (August 2026).
 
 - [fwtool.py](https://github.com/lmirel/fwtool.py) (or equivalent fork) — packs/unpacks Sony `.dat`/`.fdat` firmware images.
 - [Sony-PMCA-RE](https://github.com/gdlg/sony-pmca) — talks to the camera over USB to read/write firmware.
-- The genuine Sony updater `.exe` for your camera's **currently installed** firmware version (e.g. `Update_DSCRX100M5V200.exe`), or a `.dat` already extracted from it.
+- The genuine Sony updater `.exe` for your camera's **currently installed** firmware version (e.g. `Update_DSCRX100M5V200.exe`), or a `.dat` already extracted from it. [Download link](https://www.sony.com/electronics/support/compact-cameras-dsc-rx-series/dsc-rx100m5/downloads/W0011102)
+
+> Tested against a installer .exe with SHA-256
+> `105004cce589cf201a3b05d466b12709c9ac3203de9ca5a2269a8fb9d87aca9c`
+> (`Update_DSCRX100M5V200.exe`, firmware v2.00). Reproduce with:
+> `shasum -a 256 Update_DSCRX100M5V200.exe`
 
 ## 1. Extract the genuine firmware.dat from the updater .exe
 
@@ -29,7 +34,9 @@ from that offset to EOF, producing a `firmware.dat` you can unpack directly
 instead of the `.exe`:
 
 ```
+cd [path-to-RX100V-Firmware/backup]
 python3 extract_dat_from_exe.py Update_DSCRX100M5V200.exe unpacked/
+cd [path-to-fwtool-repo]
 python3 fwtool.py unpack -f unpacked/firmware.dat -o unpacked/
 ```
 
