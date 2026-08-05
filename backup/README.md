@@ -19,9 +19,31 @@ python3 fwtool.py unpack -f Update_DSCRX100M5V200.exe -o unpacked/
 This produces `unpacked/firmware.dat`, `firmware.fdat`, `firmware.tar`,
 `config.yaml`, and `updater.img` (the filesystem/`fs` partition).
 
-If `unpack` fails with `Unknown exe file` (some installer SFX wrappers aren't
-recognized), locate the `.dat` magic bytes (`\x89UFU\r\n\x1a\n`) manually inside
-the exe and slice the file from that offset to EOF instead.
+### Fallback: `Exception: Unknown exe file`
+
+Some installer SFX wrappers aren't recognized by `fwtool.py`'s `lzh` parser
+(no `-lh0-` method string found where expected). Work around it by locating
+the `.dat` magic bytes directly and slicing the file from that offset to EOF,
+then unpacking the resulting `.dat` directly instead of the `.exe`:
+
+```
+python3 -c "
+import shutil
+magic = b'\x89UFU\r\n\x1a\n'
+with open('Update_DSCRX100M5V200.exe', 'rb') as src:
+    data = src.read()
+    offset = data.find(magic)
+    if offset < 0:
+        raise SystemExit('magic bytes not found')
+    src.seek(offset)
+    with open('unpacked/firmware.dat', 'wb') as dst:
+        shutil.copyfileobj(src, dst)
+"
+python3 fwtool.py unpack -f unpacked/firmware.dat -o unpacked/
+```
+
+The second command produces the same `firmware.tar`/`config.yaml`/`updater.img`
+outputs as the normal path.
 
 ## 2. Keep the config and `updater.img`
 
