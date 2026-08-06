@@ -252,18 +252,53 @@ pinned to an eye — no longer needed).
      shutter button. This is a materially different conclusion than this
      doc's original "Where this lives" framing ("it calls through this same
      shared HAL library like any other client").
-   - **Still needed to fully close this out**: empirical, on-device
-     confirmation of which path the physical shutter button actually uses.
-     Cheapest test: patch a debug counter/log line at the entry of
-     `executeAutoFocusStartTrigger` (no behavior change), reflash, and
-     observe (via a log partition or any available on-device logging) whether
-     it increments on a normal S1 half-press in AF-C mode, versus only when
-     triggered from a tethered/remote Android-side client. If it does *not*
-     increment on a physical half-press, the whole patch needs to be
-     retargeted to wherever BizFw's own AVBBC/OSAL AF-trigger dispatch
-     happens instead (which would require reverse engineering the stripped
-     `libBizFw.so`, a substantially larger undertaking than originally
-     scoped).
+   - **Further static evidence (2026-08-05, round 2) — now strongly
+     (not just circumstantially) pointing the same direction.** Checked the
+     two remaining plausible bridge points directly:
+     - `mediaserver`'s own `DT_NEEDED` list (`objdump -p`) is a stock Android
+       set (`libaudioflinger.so`, `libcameraservice.so`,
+       `libcameraexservice.so`, `libmediaplayerservice.so`, ...) — it does
+       **not** link `libosal_uipc.so` or `libarbiter_proxy.so` itself.
+       `libcameraexservice.so` and `libcameraservice.so` likewise only pull
+       in standard Binder/media libs (`libbinder`, `libcamera_client`,
+       `libmedia`, `libgui`, `libhardware`, ...) plus `libcamera.so` —
+       nothing OSAL/arbiter-related anywhere in that chain.
+     - `libcamera.so` itself has **zero** string references to
+       `osal`/`arbiter`/`ABT_`/`bizfw`/`avbbc` (checked via `strings`), and
+       the only device node it opens is `/dev/stream2` (a V4L2-style
+       streaming character device).
+     - `libBizFw.so`, by contrast, opens **`/dev/mem`** directly and exports
+       an `AvbbcPhycMem` C++ class (`GetLogAddr`/`MemSet`/cache-mode
+       constructor) — i.e. BizFw pokes hardware registers via raw
+       memory-mapped I/O, completely bypassing the kernel driver model that
+       `/dev/stream2` (and therefore `libcamera.so`) relies on. `arbiter.so`
+       and `libBizFw2.so` reference no device nodes at all (pure IPC/logic
+       glue).
+     - Conclusion: two entirely disjoint hardware-access mechanisms, with no
+       shared library link, no shared device node, and no string
+       cross-references in either direction. Static analysis cannot
+       *prove* a negative (BizFw could still reach `libcamera.so`'s process
+       via a Binder client registered elsewhere, or the two mechanisms could
+       converge on the same physical AF-motor register from opposite ends),
+       but every static signal now points the same way: the physical
+       shutter/AF-C loop almost certainly drives the lens/AF hardware
+       directly through BizFw's `/dev/mem` MMIO path, not through
+       `libcamera.so`'s `sendCommand()`/`executeAutoFocusStartTrigger`.
+   - **Still needed to fully close this out**: static analysis has reached
+     its practical limit here — the remaining uncertainty (does anything,
+     anywhere, call from the BizFw/AVBBC side into `libcamera.so`'s process
+     at runtime via a mechanism invisible to `objdump`/`strings`, e.g. a
+     runtime-registered Binder callback) can only be settled by an
+     empirical, on-device test. Cheapest test: patch a debug counter/log
+     line at the entry of `executeAutoFocusStartTrigger` (no behavior
+     change), reflash, and observe (via a log partition or any available
+     on-device logging) whether it increments on a normal S1 half-press in
+     AF-C mode, versus only when triggered from a tethered/remote
+     Android-side client. If it does *not* increment on a physical
+     half-press, the whole patch needs to be retargeted to wherever BizFw's
+     own AVBBC/OSAL AF-trigger dispatch happens instead (which would require
+     reverse engineering the stripped `libBizFw.so`, a substantially larger
+     undertaking than originally scoped).
 
 ## Proposed patch shape (single choke-point design)
 
