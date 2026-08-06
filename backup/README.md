@@ -6,8 +6,8 @@ goes wrong. Verified working end-to-end on RX100M5 (August 2026).
 
 ## Prerequisites
 
-- [fwtool.py](https://github.com/lmirel/fwtool.py) (or equivalent fork) — packs/unpacks Sony `.dat`/`.fdat` firmware images.
-- [Sony-PMCA-RE](https://github.com/gdlg/sony-pmca) — talks to the camera over USB to read/write firmware.
+- [fwtool.py](https://github.com/JEF1056/fwtool.py) — packs/unpacks Sony `.dat`/`.fdat` firmware images (fork with LZPT write support and performance fixes; see [`../patch/README.md`](../patch/README.md)).
+- [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE) — talks to the camera over USB to read/write firmware.
 - The genuine Sony updater `.exe` for your camera's **currently installed** firmware version (e.g. `Update_DSCRX100M5V200.exe`), or a `.dat` already extracted from it. [Download link](https://www.sony.com/electronics/support/compact-cameras-dsc-rx-series/dsc-rx100m5/downloads/W0011102)
 
 > Tested against a installer .exe with SHA-256

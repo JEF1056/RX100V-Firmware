@@ -19,31 +19,58 @@ flashed through the exact same validated path as
 The backup package never actually decodes any partition — it repacks the
 untouched `firmware.tar` straight from the Sony installer and only bumps the
 version field (see backup step 3). Our case requires modifying one file
-(`libcamera.so`) that lives three archive layers deep inside one partition
-(`nflasha16`) inside `firmware.tar`, then reassembling every one of those
-layers back into a valid, flashable form.
+(`libcamera.so`) that lives inside one partition (`nflasha16`) inside
+`firmware.tar`, then reassembling that partition back into a valid,
+flashable form.
 
-## The nesting problem (confirmed directly against fwtool.py, 2026-08-05)
+## The nesting problem (confirmed directly against fwtool.py and a real
+device dump, 2026-08-05 - corrected from an earlier, wrong guess)
 
 ```
 firmware.tar
  └─ nflasha16          (raw partition, 82.75MB)
      confirmed via fwtool.archive.lzpt.isLzpt() → True: this is LZPT format
-     └─ (LZPT-decoded) cramfs filesystem, 763 entries — includes /lib/libcamera.so
-         └─ libcamera.so's cramfs entry is itself wrapped in one more archive
-            layer per extract_from_partition.py's extraction log ("archive
-            with 1 entries" immediately around the file) — exact sub-format
-            not yet pinned down, likely cramfs's own per-file compression
-            framing rather than a fourth distinct format.
+     └─ (LZPT-decoded) ext2 filesystem, 763 entries, 162MB
+         └─ /lib/libcamera.so, stored raw (215548 bytes, no further wrapping)
 ```
+
+An earlier pass at this doc guessed the middle layer was cramfs with a
+fourth, unidentified wrapper around `libcamera.so` specifically. Both were
+wrong: traced directly against `nflasha16_live.img` with instrumented
+`fwtool.archive` format detection, the middle layer is **ext2**, and
+`/lib/libcamera.so` sits directly in it with no further wrapping (some
+*other*, unrelated files in that same ext2 image are individually
+gzip-compressed, which is what caused the earlier "one more archive layer"
+misreading — that gzip layer belongs to a different file, not this one).
 
 `fwtool/archive/`'s modules are **read-only** for the formats that matter here:
 
 | Format | Reader | Writer |
 |---|---|---|
-| tar (outer `firmware.tar`) | `tar.readTar` | none in fwtool — use Python's stdlib `tarfile` instead (standard format, no proprietary framing, so this is low-risk) |
-| LZPT (`nflasha16`'s own wrapper) | `lzpt.readLzpt` | **none** |
-| cramfs (the 763-entry filesystem inside it) | `cramfs.readCramfs` | `cramfs.writeCramfs` ✅ already exists and is reusable |
+| tar (outer `firmware.tar`) | `tar.readTar` | none in fwtool — use Python's stdlib `tarfile` instead (standard format, no proprietary framing, so this is low-risk; see `splice_into_tar.py`) |
+| LZPT (`nflasha16`'s own wrapper) | `lzpt.readLzpt` | **none in fwtool** — added in `fwtool/archive/lzpt.py`'s `writeLzpt` |
+| ext2 (the 763-entry filesystem inside it) | `ext2.readExt2` | **none in fwtool, and not worth writing** — a real ext2 writer needs full block/group-descriptor/bitmap allocation logic. Instead `patch_partition.py` does an **in-place same-size byte patch**: it resolves the target file's existing data blocks via `ext2.py`'s own inode/block-pointer structs and overwrites them directly, requiring the new content be exactly the same length as the original (true for instruction/constant-level patches, which don't add code). |
+
+## Source of truth: the installer's `firmware.tar`, not the live device dump
+
+[`../dump-firmware/`](../dump-firmware) pulls a *live* `nflasha16` straight off
+a camera (`nflasha16_live.img`) and can extract `libcamera.so` from it. That
+live dump is **only** used for two things: (1) validating that our archive
+tooling reads real device data correctly, and (2) providing real
+(non-synthetic) compressed bytes to stress-test `deflateLz77`/`writeLzpt`
+against. [`../dump-firmware/README.md`](../dump-firmware/README.md#verifying-a-dump-is-genuine)'s
+SHA-256 comparison against the installer-unpacked copy is exactly this check
+— confirming the live dump matches the official package, nothing more.
+
+**The patch itself must be built against `nflasha16` from the *same*
+`firmware.tar` that `config.yaml`/`updater.img` come from** (i.e. unpacked
+from the Sony installer `.exe` per `../backup/README.md`), never from a
+re-derived live dump. Splicing a live-pulled partition into an otherwise
+installer-sourced package risks a version/build mismatch between partitions
+that the SHA-256 spot-check on one file wouldn't catch. `patch_partition.py`
+(below) always takes the unpacked `firmware.tar` as its input, matching
+`backup/README.md`'s process exactly — the live dump never enters the build
+pipeline, only its role as a cross-check for extraction correctness.
 
 **Blocking gap (now closed for items 1-2): there was no LZPT encoder
 anywhere in fwtool.py.** The only LZ77 code in the repo was
@@ -71,64 +98,95 @@ back into `nflasha16`'s original wrapped form.
    and writes out a fresh `LzptHeader`/`LzptTocEntry` table. Verified via a
    read → write → read round trip that reproduces the original decompressed
    bytes exactly.
-3. **Still needed.** `patch_partition.py` (new, sibling to
-   `dump-firmware/extract_from_partition.py`, reusing its same recursion
-   logic): the mirror-image operation — walk the same nested-archive chain,
-   splice in the replacement bytes for one target file, and re-serialize
-   each layer outward using `writeCramfs`/`writeLzpt` above.
-4. **Still needed.** Outer `firmware.tar` rebuild: use Python's stdlib
-   `tarfile` module directly (fwtool has no `writeTar`) to swap in the
-   modified `nflasha16` entry while copying every other partition entry
-   through byte-for-byte unchanged, preserving the exact mtime/mode/uid/gid
-   `tar.readTar` recorded for each.
+3. ✅ **Done.** `patch/patch_partition.py` (sibling to
+   `dump-firmware/extract_from_partition.py`, importing `fwtool.archive.ext2`'s
+   own structs so block-pointer resolution stays in sync with fwtool.py):
+   decodes `nflasha16` via `lzpt.readLzpt`, resolves the target file's inode
+   and direct/indirect data blocks by walking the ext2 directory tree from
+   the root inode, overwrites those blocks in place with the new
+   same-length content, and re-encodes via `lzpt.writeLzpt`. Refuses with a
+   clear error if the new content isn't exactly the same size, or if the
+   file has a sparse hole (neither case is supported without a real ext2
+   block allocator).
+4. ✅ **Done.** `patch/splice_into_tar.py`: uses Python's stdlib `tarfile`
+   to replace one named member's bytes in `firmware.tar` while copying every
+   other member through unchanged (verified members' size/mtime/mode/uid/gid
+   are preserved exactly for untouched entries).
 
-> **Performance note:** fwtool's existing `inflateLz77`/`readLzpt` are pure
-> Python and decode real (back-reference-heavy) LZ77 data slowly — a full
-> `nflasha16` decode (162MB decompressed) takes long enough that
-> `patch_partition.py` should decode once, cache the intermediate cramfs
-> blob to disk, and only re-run the (fast, literal-only) `writeLzpt` step
-> when iterating on a patch.
+**Tested against the real `nflasha16_live.img` (2026-08-05):**
+- No-op round trip (patch `/lib/libcamera.so` with its own unmodified
+  bytes): decoded ext2 image byte-identical to the original, `libcamera.so`
+  and all 763 ext2 entries unchanged, LZPT re-decode matches.
+- Real single-byte modification: correctly appears at the exact patched
+  offset in the final decoded output, every byte outside the patch
+  (including the rest of `libcamera.so` and all 762 other ext2 entries)
+  verified byte-for-byte unchanged.
+- `splice_into_tar.py` tested against a synthetic multi-member tar: target
+  member replaced with new (differently-sized) content, other members'
+  bytes/mtime/mode preserved exactly.
+
+> **Performance note:** fwtool's `inflateLz77`/`ChunkedFile` had two O(n²)
+> bugs (repeated `bytes +=` instead of `bytearray`) that made a full
+> `nflasha16` decode take 379s; both are now fixed in the `JEF1056/fwtool.py`
+> fork, bringing a full real decode down to ~9.5s. `patch_partition.py`'s
+> whole pipeline (decode → patch → re-encode → re-decode to verify) runs in
+> well under a minute end-to-end on the real partition.
+
+## Usage
+
+```
+# 1. Extract the target file, apply your actual patch to it however you like
+#    (e.g. a hex editor, a small Python script, Ghidra's patch/export),
+#    producing a same-length modified copy.
+python3 ../dump-firmware/extract_from_partition.py nflasha16.img libcamera.so libcamera.so.orig
+# ... produce libcamera.so.patched, same byte length as libcamera.so.orig ...
+
+# 2. Patch it into the partition image
+python3 patch_partition.py nflasha16.img /lib/libcamera.so libcamera.so.patched nflasha16_patched.img
+
+# 3. Splice the patched partition into firmware.tar
+python3 splice_into_tar.py firmware.tar nflasha16 nflasha16_patched.img firmware_patched.tar
+
+# 4. From here on, follow ../backup/README.md exactly, substituting
+#    firmware_patched.tar for the untouched firmware.tar.
+```
 
 ## Integrating the re-encoded partition into the installer firmware
 
-Once `writeLzpt` (and eventually `patch_partition.py`) produce a new
-`nflasha16` byte blob, getting that into a flashable `.dat` is **not** a new
-process \u2014 it rejoins `../backup/README.md`'s already-proven pipeline at the
-point right before `fwtool.py pack`:
+`patch_partition.py` and `splice_into_tar.py` (above) produce a new
+`firmware.tar` with the patched partition spliced in. Getting that into a
+flashable `.dat` is **not** a new process — it rejoins `../backup/README.md`'s
+already-proven pipeline at the point right before `fwtool.py pack`:
 
-1. **Splice the new `nflasha16` bytes into `firmware.tar`.** Open the
-   original `firmware.tar` with Python's stdlib `tarfile`, iterate its
-   members, and write every member through unchanged to a new tar **except**
-   the `nflasha16` entry, whose contents are replaced with the
-   `writeLzpt`-produced bytes (updating that member's `size`, keeping its
-   `mtime`/`mode`/`uid`/`gid` as recorded). This is what `patch_partition.py`
-   (tooling item 3/4 above) will automate; until then it can be done with a
-   short one-off script.
+1. **Splice the new `nflasha16` bytes into `firmware.tar`** — done by
+   `splice_into_tar.py` (step 3 in Usage above): every member is copied
+   through unchanged except `nflasha16`, whose contents are replaced with
+   `patch_partition.py`'s output (updating that member's `size`, keeping its
+   `mtime`/`mode`/`uid`/`gid` as recorded).
 2. **Hand the rebuilt `firmware.tar` to `fwtool.py pack` exactly like the
-   backup package does** \u2014 same `config.yaml` (with the version field
+   backup package does** — same `config.yaml` (with the version field
    bumped per `../backup/README.md`'s `checkGuard` requirement), same
    `updater.img`, only the `-f` argument changes:
    ```
    fwtool.py pack -c config_patched.yaml -u unpacked/updater.img \
-       -f rebuilt-firmware.tar -o patched_pack
+       -f firmware_patched.tar -o patched_pack
    ```
    This produces `firmware_packed.dat`, structurally identical to a backup
    package except for the one modified partition inside it.
 3. **Flash it with the same proven command** from `../backup/README.md`:
    `pmca-console.py firmware -f firmware_packed.dat`.
 4. In other words: everything upstream of "hand `fwtool.py pack` a
-   `firmware.tar`" is new (steps 1-2 of "Required new tooling" above);
+   `firmware.tar`" is new (`patch_partition.py` + `splice_into_tar.py`);
    everything from `fwtool.py pack` onward is identical, unmodified backup
-   packaging \u2014 the patch only ever changes *which bytes* go into the tar
+   packaging — the patch only ever changes *which bytes* go into the tar
    that gets packed, never how the tar becomes a flashable `.dat`.
 
 ## Validation plan (must pass before a single patched byte is ever flashed)
 
-1. **No-op round trip first.** Run the full read → reserialize (no patch
-   applied) → write pipeline and confirm `nflasha16`'s bytes (and ideally the
-   whole rebuilt `firmware.tar`) come out identical to the original. This
-   isolates bugs in the new LZ77 encoder / `writeLzpt` / cramfs rebuild /
-   tar rebuild from the actual behavior patch.
+1. ✅ **No-op round trip — done.** Read → reserialize (no patch applied) →
+   write pipeline confirmed identical to the original: `nflasha16`'s decoded
+   ext2 bytes, `libcamera.so`, and all 763 ext2 entries matched exactly (see
+   "Tested against the real `nflasha16_live.img`" above).
 2. **Then follow `../backup/README.md`'s packaging steps unchanged** —
    same `config.yaml`, same `updater.img`, same version-bump requirement,
    same `fwtool.py pack` invocation, same flash command. The only difference
